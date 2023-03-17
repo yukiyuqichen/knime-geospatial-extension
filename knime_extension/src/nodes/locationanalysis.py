@@ -635,3 +635,402 @@ class MCLPNode:
         DemandPt = DemandPt.drop(columns=["linxy", "SIDcoord"])
         DemandPt = DemandPt.reset_index(drop=True)
         return knext.Table.from_pandas(DemandPt)
+
+
+
+############################################
+# Location-allocation P-center Solver
+############################################
+@knext.node(
+    name="P-center Solver",
+    node_type=knext.NodeType.PREDICTOR,
+    icon_path=__NODE_ICON_PATH + "pcenter.png",
+    category=__category,
+    after="",
+)
+@knext.input_table(
+    name="Input OD Matrix for candidate facilities (m rows X n columns )",
+    description="Table with distance matrix to (n-1) candidate facilities and the nearest required facilities",
+)
+@knext.output_table(
+    name="P-center result table",
+    description="candidate column name and chosen status(1/0)",
+)
+@knut.pulp_node_description(
+    short_description="p-center (minimax) Minimizes the maximum distance between demand points and their nearest facilities by locating p facilities.",
+    description="""The p-center model help to chose p facliteis(p) from a set of  candidate facilities (n) for locations(m) based on the OD matrix (m X n). 
+    If required facilities are considered, a column respresented the distance to the nearest required facilites should be specified.
+    The p-center (minimax) problem will be solved by PuLP package. 
+    """,
+    references={
+        "Pulp.Solver": "https://coin-or.github.io/pulp/guides/how_to_configure_solvers.html",
+    },
+)
+class PcenterSolverNode:
+
+    Pnumber = knext.IntParameter(
+        "Input optimum p number ",
+        "The optimum p number of facilities",
+        3,
+    )
+
+    RequiredID = knext.ColumnParameter(
+        "Column for required facility",
+        "Travel cost column of  required facility or Travel cost column of nearest required facilities ",
+        # port_index=0,
+        column_filter=knut.is_numeric,
+        include_row_key=False,
+        include_none_column=True,
+    )
+
+    def configure(self, configure_context, input_schema_1):
+        return knext.Schema.from_columns(
+            [
+                knext.Column(knext.string(), "FacilityID"),
+                knext.Column(knext.int32(), "Chosen"),
+            ]
+        )
+
+    def execute(self, exec_context: knext.ExecutionContext, input_1):
+        cost_matrix = gp.GeoDataFrame(input_1.to_pandas()).rename(
+            columns={self.RequiredID: "Required"}
+        )
+        import pulp
+        import pandas as pd
+
+        P = self.Pnumber
+        if self.RequiredID is not None:
+            P = P + 1
+        demand = cost_matrix.shape[0]
+        candidate = cost_matrix.shape[1]
+        # Whether exist required facilites
+        if self.RequiredID is not None:
+            last_col = cost_matrix["Required"]
+            cost_matrix = pd.concat(
+                [cost_matrix.drop(columns=["Required"]), last_col], axis=1
+            )
+            candidate = cost_matrix.shape[1]
+            nrequire = candidate - 1
+
+        # Define the optimization problem
+        prob = pulp.LpProblem("p-center", pulp.LpMinimize)
+
+        # Define the decision variables
+        x = pulp.LpVariable.dicts(
+            "x", [(i, j) for i in range(demand) for j in range(candidate)], cat="Binary"
+        )
+        y = pulp.LpVariable.dicts("y", [j for j in range(candidate)], cat="Binary")
+        Z = pulp.LpVariable("Z", lowBound=0)
+
+        # Define the objective function
+        prob += Z
+
+        # Define the constraints
+        for i in range(demand):
+            prob += pulp.lpSum([x[(i, j)] for j in range(candidate)]) == 1
+
+        for j in range(candidate):
+            for i in range(demand):
+                prob += x[(i, j)] <= y[j]
+
+        for i in range(demand):
+            prob += (
+                pulp.lpSum(
+                    [x[(i, j)] * cost_matrix.iloc[i][j] for j in range(candidate)]
+                )
+                <= Z
+            )
+
+        prob += pulp.lpSum([y[j] for j in range(candidate)]) == P
+
+        if self.RequiredID is not None:
+            prob += y[nrequire] == 1
+
+        # Solve the problem
+        prob.solve()
+
+        status = pulp.LpStatus[prob.status]
+        print(f"Optimization status: {status}")
+        # Extract the value of y for each candidate facility
+        dfy = pd.DataFrame({"FacilityID": cost_matrix.columns})
+        for j in range(candidate):
+            dfy.loc[j, "Chosen"] = pulp.value(y[j])
+        dfy["FacilityID"] = dfy["FacilityID"].astype(str)
+        dfy["Chosen"] = dfy["Chosen"].astype(int)
+        return knext.Table.from_pandas(dfy)
+
+
+############################################
+# Location-allocation P-median Solver
+############################################
+@knext.node(
+    name="P-median Solver",
+    node_type=knext.NodeType.PREDICTOR,
+    icon_path=__NODE_ICON_PATH + "pmedian.png",
+    category=__category,
+    after="",
+)
+@knext.input_table(
+    name="Input demand data(m rows ) ",
+    description="Table with demand column and distance column (optional) to the nearest required facilities ",
+)
+@knext.input_table(
+    name="Input OD Matrix for candidate facilities (m rows X n columns )",
+    description="Table with population and distance matrix to n candidate facilities, row order should be consistent with demand data and required",
+)
+@knext.output_table(
+    name="P-median result table",
+    description="candidate column name and chosen status(1/0)",
+)
+@knut.pulp_node_description(
+    short_description="Solve P-median problem minimize total weighted spatial costs.",
+    description="""The p-median model, one of the most widely used location models of any kind,
+    locates p facilities and allocates demand nodes to them to minimize total weighted distance traveled. 
+    If required facilities are considered, a column respresented the distance to the nearest required facilites should be specified.
+    The P-Median problem will be solved by PuLP package. 
+    """,
+    references={
+        "Pulp.Solver": "https://coin-or.github.io/pulp/guides/how_to_configure_solvers.html",
+    },
+)
+class PmediaSolverNode:
+
+    Pnumber = knext.IntParameter(
+        "Input optimum p number of p-median ",
+        "The optimum p number of p-median",
+    )
+    PopulationID = knext.ColumnParameter(
+        "Demand column",
+        "The column for demand (e.g., population) ",
+        # port_index=0,
+        column_filter=knut.is_numeric,
+        include_row_key=False,
+        include_none_column=False,
+    )
+
+    RequiredID = knext.ColumnParameter(
+        "Distance column for required facilities",
+        "The travel cost to the nearest required facilities ",
+        # port_index=0,
+        column_filter=knut.is_numeric,
+        include_row_key=False,
+        include_none_column=True,
+    )
+
+    def configure(self, configure_context, input_schema_1, input_schema_2):
+        return knext.Schema.from_columns(
+            [
+                knext.Column(knext.string(), "FacilityID"),
+                knext.Column(knext.int32(), "Chosen"),
+            ]
+        )
+
+    def execute(self, exec_context: knext.ExecutionContext, input_1, input_2):
+        df1 = gp.GeoDataFrame(input_1.to_pandas()).rename(
+            columns={self.RequiredID: "Required"}
+        )
+        df2 = gp.GeoDataFrame(input_2.to_pandas())
+        import pulp
+        import pandas as pd
+
+        P = self.Pnumber
+        if self.RequiredID is not None:
+            P = P + 1
+        popu = df1[self.PopulationID].values.tolist()
+        cost_matrix = df2
+        demand = cost_matrix.shape[0]
+        candidate = cost_matrix.shape[1]
+        # Whether exist required facilites
+        if self.RequiredID is not None:
+            last_col = df1["Required"]
+            cost_matrix = pd.concat([cost_matrix, last_col], axis=1)
+            candidate = cost_matrix.shape[1]
+            nrequire = candidate - 1
+
+        # Define the optimization problem
+        prob = pulp.LpProblem("p-media", pulp.LpMinimize)
+
+        # Define the decision variables
+        x = pulp.LpVariable.dicts(
+            "x", [(i, j) for i in range(demand) for j in range(candidate)], cat="Binary"
+        )
+        y = pulp.LpVariable.dicts("y", [j for j in range(candidate)], cat="Binary")
+
+        # Define the objective function
+        prob += pulp.lpSum(
+            [
+                x[(i, j)] * cost_matrix.iloc[i][j] * popu[i]
+                for i in range(demand)
+                for j in range(candidate)
+            ]
+        )
+
+        # Define the constraints
+        for i in range(demand):
+            prob += pulp.lpSum([x[(i, j)] for j in range(candidate)]) == 1
+
+        for j in range(candidate):
+            for i in range(demand):
+                prob += x[(i, j)] <= y[j]
+
+        prob += pulp.lpSum([y[j] for j in range(candidate)]) == P
+
+        if self.RequiredID is not None:
+            prob += y[nrequire] == 1
+
+        # Solve the problem
+        prob.solve()
+
+        status = pulp.LpStatus[prob.status]
+        print(f"Optimization status: {status}")
+
+        # Extract the value of y for each candidate facility
+        dfy = pd.DataFrame({"FacilityID": cost_matrix.columns})
+        for j in range(candidate):
+            dfy.loc[j, "Chosen"] = pulp.value(y[j])
+        dfy["FacilityID"] = dfy["FacilityID"].astype(str)
+        dfy["Chosen"] = dfy["Chosen"].astype(int)
+        return knext.Table.from_pandas(dfy)
+
+
+############################################
+# Location-allocation MCLP Solver
+############################################
+@knext.node(
+    name="MCLP Solver",
+    node_type=knext.NodeType.PREDICTOR,
+    icon_path=__NODE_ICON_PATH + "MCLP.png",
+    category=__category,
+    after="",
+)
+@knext.input_table(
+    name="Input demand data(m rows ) ",
+    description="Table with demand column and distance column (optional) to the nearest required facilities ",
+)
+@knext.input_table(
+    name="Input OD Matrix for candidate facilities (m rows X n columns )",
+    description="Table with population and distance matrix to n candidate facilities, row order should be consistent with demand data and required",
+)
+@knext.output_table(
+    name="P-median result table",
+    description="candidate column name and chosen status(1/0)",
+)
+@knut.pulp_node_description(
+    short_description="Solve MCLP problem to Maximize Capacitated Coverage by setting an impedance cutoff.",
+    description="""The MCLP model, maximum covering location problem (MCLP), aims to Locate p facilities,
+    and demand is covered if it is within a specified distance (time) of a facility. 
+    If required facilities are considered, a column respresented the distance to the nearest required facilites should be specified.
+    The P-Median problem will be solved by PuLP package. 
+    """,
+    references={
+        "Pulp.Solver": "https://coin-or.github.io/pulp/guides/how_to_configure_solvers.html",
+    },
+)
+class MCLPSolverNode:
+
+    Pnumber = knext.IntParameter(
+        "Optimum p number ",
+        "The optimum p number of facilities",
+        4,
+    )
+    Threshold = knext.DoubleParameter(
+        "Threshold",
+        "Desired threshold distance or cost",
+    )
+    PopulationID = knext.ColumnParameter(
+        "Demand column",
+        "The column for demand (e.g., population) ",
+        # port_index=0,
+        column_filter=knut.is_numeric,
+        include_row_key=False,
+        include_none_column=False,
+    )
+
+    RequiredID = knext.ColumnParameter(
+        "Distance column for required facilities",
+        "The travel cost to the nearest required facilities ",
+        # port_index=0,
+        column_filter=knut.is_numeric,
+        include_row_key=False,
+        include_none_column=True,
+    )
+
+    def configure(self, configure_context, input_schema_1, input_schema_2):
+        return knext.Schema.from_columns(
+            [
+                knext.Column(knext.string(), "FacilityID"),
+                knext.Column(knext.int32(), "Chosen"),
+            ]
+        )
+
+    def execute(self, exec_context: knext.ExecutionContext, input_1, input_2):
+        df1 = gp.GeoDataFrame(input_1.to_pandas()).rename(
+            columns={self.RequiredID: "Required"}
+        )
+        df2 = gp.GeoDataFrame(input_2.to_pandas())
+        import pulp
+        import pandas as pd
+
+        P = self.Pnumber
+        if self.RequiredID is not None:
+            P = P + 1
+        popu = df1[self.PopulationID].values.tolist()
+        cost_matrix = df2
+        demand = cost_matrix.shape[0]
+        candidate = cost_matrix.shape[1]
+        cutoff = self.Threshold
+        # Whether exist required facilites
+        if self.RequiredID is not None:
+            last_col = df1["Required"]
+            cost_matrix = pd.concat([cost_matrix, last_col], axis=1)
+            candidate = cost_matrix.shape[1]
+            nrequire = candidate - 1
+
+        # Define the optimization problem
+        prob = pulp.LpProblem("mclp", pulp.LpMinimize)
+
+        # Define the decision variables
+        x = pulp.LpVariable.dicts(
+            "x", [(i, j) for i in range(demand) for j in range(candidate)], cat="Binary"
+        )
+        y = pulp.LpVariable.dicts("y", [j for j in range(candidate)], cat="Binary")
+
+        # Define the objective function
+
+        prob += pulp.lpSum(
+            [x[(i, j)] * popu[i] for i in range(demand) for j in range(candidate)]
+        )
+
+        # Define the constraints
+        for i in range(demand):
+            prob += pulp.lpSum([x[(i, j)] for j in range(candidate)]) == 1
+
+        for j in range(candidate):
+            for i in range(demand):
+                prob += x[(i, j)] <= y[j]
+
+        # Define the threshold cutoff distance constraint
+        for i in range(demand):
+            prob += (
+                pulp.lpSum(
+                    [cost_matrix.iloc[i][j] * x[(i, j)] for j in range(candidate)]
+                )
+                <= cutoff
+            )
+
+        # Define the one facility required constraint
+        prob += pulp.lpSum([y[j] for j in range(candidate)]) == P
+        prob += y[nrequire] == 1
+        # Solve the problem
+        prob.solve()
+
+        status = pulp.LpStatus[prob.status]
+        print(f"Optimization status: {status}")
+
+        # Extract the value of y for each candidate facility
+        dfy = pd.DataFrame({"FacilityID": cost_matrix.columns})
+        for j in range(candidate):
+            dfy.loc[j, "Chosen"] = pulp.value(y[j])
+        dfy["FacilityID"] = dfy["FacilityID"].astype(str)
+        dfy["Chosen"] = dfy["Chosen"].astype(int)
+        return knext.Table.from_pandas(dfy)

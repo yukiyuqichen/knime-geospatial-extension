@@ -17,5 +17,6 @@ dependencies:
   - seaborn
   - geopy
   - pip
+  - pygeoda
   - pip:
     - pyecharts
