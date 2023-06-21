@@ -342,6 +342,7 @@ class BaseMapSettings:
             "Stamen TopOSMFeatures",
             "Stamen TopOSMRelief",
             "Stamen Watercolor",
+            "Stamen Watercolor",
             "Strava All",
             "Strava Ride",
             "Strava Run",
