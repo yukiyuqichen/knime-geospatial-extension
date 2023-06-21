@@ -150,10 +150,7 @@ def is_int(column: knext.Column) -> bool:
     Checks if column is integer.
     @return: True if Column is integer
     """
-    return column.ktype in [
-        knext.int32(),
-        knext.int64(),
-    ]
+    return column.ktype == knext.int32()
 
 
 def is_string(column: knext.Column) -> bool:
@@ -178,18 +175,6 @@ def is_numeric_or_string(column: knext.Column) -> bool:
     @return: True if Column is numeric or string
     """
     return boolean_or(is_numeric, is_string)(column)
-
-
-def is_int_or_string(column: knext.Column) -> bool:
-    """
-    Checks if column is int or string
-    @return: True if Column is numeric or string
-    """
-    return column.ktype in [
-        knext.int32(),
-        knext.int64(),
-        knext.string(),
-    ]
 
 
 def is_binary(column: knext.Column) -> bool:
